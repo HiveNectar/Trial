@@ -6,7 +6,7 @@ const NAME_KEY_PREFIX = 'poc:done:';
 const VOTES_KEY_PREFIX = 'poc:votes:';
 const COMMENT_KEY_PREFIX = 'poc:comments:'; 
 const VERSION = '2.9-EMAIL-CHECK-RTDB-SESSION'; // Updated Version
-const SESSION_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes in milliseconds
+const SESSION_TIMEOUT_MS = 1 * 60 * 1000; // 1 minute in milliseconds
 
 /* ---------------- Firebase Setup ---------------- */
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
@@ -904,23 +904,38 @@ const feedbackBtn = $('#feedbackBtn');
 // New global variables for session management
 let sessionTimeoutId;
 let lastActivityTime = Date.now();
+// ADDED: List of events that reset the activity timer for robust tracking
+const activityEvents = ['mousemove', 'keypress', 'scroll', 'click', 'touchstart']; 
 
 // Utility function to reset the UI to the login screen
 function resetAppToLogin() {
+    // FIX: Remove all activity listeners on logout to prevent memory leaks and redundant timers
+    activityEvents.forEach(event => { 
+        document.removeEventListener(event, resetActivityTimer); 
+    });
+    
     clearTimeout(sessionTimeoutId);
     
     // Check if the app is currently visible before resetting
     if (appCard && !appCard.classList.contains('hide')) {
         toast('Session expired due to inactivity. Please log in again.', { type: 'warning', duration: 3000 });
+        
+        // CRITICAL FIX: Clear local storage to enforce re-login
+        localStorage.removeItem('poc:name');
+        localStorage.removeItem('poc:email');
+        localStorage.removeItem(UID_KEY); // UID_KEY is 'poc:uid'
+        
+        // Reset global state
+        currentUserName = null;
+        currentUserEmail = null;
     }
     
     // Hide app, show login
     if (loginCard) loginCard.classList.remove('hide');
-    if (infoCard) infoCard.classList.remove('hide'); // ADDED: Show info card
+    if (infoCard) infoCard.classList.remove('hide'); // Show info card
     if (appCard) appCard.classList.add('hide');
     
     // The form inputs will automatically be populated from localStorage on next load
-    // We do NOT clear localStorage here to allow quick re-login
 }
 
 // Function to handle activity and reset the timer
@@ -938,14 +953,11 @@ function resetActivityTimer() {
 
 // Function to attach listeners for activity (runs once on successful login)
 function setupActivityListeners() {
-    // Listen for common user interactions
-    document.removeEventListener('mousemove', resetActivityTimer);
-    document.removeEventListener('keypress', resetActivityTimer);
-    document.removeEventListener('scroll', resetActivityTimer);
-
-    document.addEventListener('mousemove', resetActivityTimer);
-    document.addEventListener('keypress', resetActivityTimer);
-    document.addEventListener('scroll', resetActivityTimer);
+    // FIX: Use the new comprehensive list of events including 'click' and 'touchstart'
+    activityEvents.forEach(event => {
+        document.removeEventListener(event, resetActivityTimer); // Ensure no duplicates
+        document.addEventListener(event, resetActivityTimer);
+    });
     
     // Immediately start the first timer
     resetActivityTimer(); 
@@ -1020,14 +1032,14 @@ async function start(name, email) {
     }
     
     if (loginCard) loginCard.classList.add('hide');
-    if (infoCard) infoCard.classList.add('hide'); // ADDED: Hide info card on tasks page
+    if (infoCard) infoCard.classList.add('hide'); // Hide info card on tasks page
     if (appCard) appCard.classList.remove('hide');
 
     renderFilters(); 
     initFiltersFromURL(); 
     applyFilters(); 
     
-    // NEW: Setup the activity timer after successful login
+    // Setup the activity timer after successful login
     setupActivityListeners(); 
 
     await updateQR(name);
@@ -1135,11 +1147,83 @@ if (initialName && initialEmail) {
 } else {
     // Show login card
     if (loginCard) loginCard.classList.remove('hide');
-    if (infoCard) infoCard.classList.remove('hide'); // ADDED: Show info card on login page
+    if (infoCard) infoCard.classList.remove('hide'); // Show info card on login page
     if (appCard) appCard.classList.add('hide');
 }
-// Modal content data structure with cleaned content
 
+
+/* ---------------- NEW FEEDBACK FORM LOGIC ---------------- */
+
+// Helper function to safely get data from existing global state
+function getAutofillData() {
+    // These global variables are already populated by the login logic in this app.js
+    const testerId = TESTER_ID || 'UNKNOWN';
+    const userName = currentUserName || `Tester (${testerId})`;
+    const userEmail = currentUserEmail || 'N/A';
+    
+    return { testerId, userName, userEmail };
+}
+
+// Function to handle the Firebase submission for the feedback form
+function handleFeedbackSubmit(e) {
+    e.preventDefault();
+    
+    const statusElement = document.getElementById('feedbackStatus');
+    const formEl = document.getElementById('feedbackForm');
+    const submitBtn = document.getElementById('submitFeedbackBtn');
+    
+    // Disable form and show status
+    statusElement.style.color = 'var(--fg)';
+    statusElement.textContent = 'Submitting...';
+    submitBtn.disabled = true;
+
+    const testerId = document.getElementById('feedbackTesterId').value;
+    const name = document.getElementById('feedbackName').value;
+    const email = document.getElementById('feedbackEmail').value;
+    const message = document.getElementById('feedbackMessage').value;
+
+    if (!message || message.trim() === '') {
+        statusElement.style.color = 'var(--danger)';
+        statusElement.textContent = 'Feedback message cannot be empty.';
+        submitBtn.disabled = false;
+        return;
+    }
+
+    const feedbackData = {
+        testerId: testerId || 'UNKNOWN',
+        name: name || 'N/A',
+        email: email || 'N/A',
+        message: message.trim(),
+        timestamp: firebase.database.ServerValue.TIMESTAMP,
+        version: VERSION 
+    };
+
+    // Save to a dedicated 'session_feedback' node
+    const dbRef = firebase.database().ref('session_feedback'); 
+    
+    dbRef.push(feedbackData)
+        .then(() => {
+            statusElement.style.color = 'var(--success)';
+            statusElement.textContent = 'Thank you! Your feedback has been submitted successfully.';
+            document.getElementById('feedbackMessage').value = ''; 
+            submitBtn.textContent = 'Feedback Submitted';
+            submitBtn.style.backgroundColor = 'var(--success)'; 
+            // Prevent re-submission by removing the listener
+            formEl.removeEventListener('submit', handleFeedbackSubmit);
+        })
+        .catch((error) => {
+            console.error("Error writing feedback: ", error);
+            statusElement.style.color = 'var(--danger)';
+            statusElement.textContent = 'Submission failed. Please try again.';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Submit Feedback'; 
+        });
+}
+
+
+/* ---------------- Modal content and Display Logic (Modified) ---------------- */
+
+// Modal content data structure with cleaned content
 const modalContent = {
     faqModal: {
         title: "Tester FAQ",
@@ -1253,13 +1337,14 @@ const modalContent = {
             <p>For urgent matters, such as login issues or errors preventing task submission, please use the primary email: <strong>admin@hivenectar.earth</strong></p>
         `
     },
+    // Modified body to serve as a placeholder for dynamic content injection
     endSessionFeedbackModal: {
         title: "End-of-Session Feedback",
-        body: `<p>Content for the End-of-Session Feedback form will be added here later.</p>`
+        body: `<p>Loading feedback form...</p>` 
     }
 };
 
-// --- Modal Display Logic (mimicking the toast/card style pop-up) ---
+// --- Modal Display Logic (Modified) ---
 
 // Elements
 const modalOverlay = document.getElementById('modalOverlay');
@@ -1267,17 +1352,73 @@ const modalTitle = document.getElementById('modalTitle');
 const modalBody = document.getElementById('modalBody');
 const modalCloseBtn = document.querySelector('.modal-close-btn');
 
-// Show Modal function
+// Show Modal function (Modified to handle the dynamic feedback form)
 function showModal(id) {
     const content = modalContent[id];
 
     if (!content) {
-        // Fallback content, similar to the "no email found" error design
         modalTitle.textContent = "Information Not Found";
         modalBody.innerHTML = "<p>The content for this section is currently unavailable.</p>";
     } else {
         modalTitle.textContent = content.title;
-        modalBody.innerHTML = content.body;
+        
+        // --- START NEW FEEDBACK FORM LOGIC ---
+        if (id === 'endSessionFeedbackModal') {
+            const { testerId, userName, userEmail } = getAutofillData();
+            
+            // Form HTML structure - Autofill is done via the 'value' attribute here.
+            // Inline styles used to ensure minimal impact on existing CSS and maintain consistency.
+            const feedbackFormHTML = `
+                <form id="feedbackForm" style="text-align: left; padding: 10px;">
+                    <p style="margin-top: 0; color: var(--fg);">Thank you for participating! Please use the form below to submit your end-of-session feedback.</p>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <label for="feedbackName" style="display: block; font-weight: bold; margin-bottom: 5px; color: var(--fg);">Name:</label>
+                        <input type="text" id="feedbackName" name="name" required readonly 
+                               value="${userName}"
+                               style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; background-color: #f0f0f0; color: var(--muted); font-weight: 600;">
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <label for="feedbackEmail" style="display: block; font-weight: bold; margin-bottom: 5px; color: var(--fg);">Email:</label>
+                        <input type="email" id="feedbackEmail" name="email" required readonly 
+                               value="${userEmail}"
+                               style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; background-color: #f0f0f0; color: var(--muted); font-weight: 600;">
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <label for="feedbackMessage" style="display: block; font-weight: bold; margin-bottom: 5px; color: var(--fg);">Your Feedback (required):</label>
+                        <textarea id="feedbackMessage" name="message" rows="5" required 
+                                  placeholder="Enter your thoughts on the session here..."
+                                  style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; resize: vertical;"></textarea>
+                    </div>
+                    
+                    <input type="hidden" id="feedbackTesterId" name="testerId" value="${testerId}">
+                    
+                    <button type="submit" id="submitFeedbackBtn" class="btn" style="width: 100%; max-width: none; margin-top: 5px; background-color: var(--cta); color: white; font-weight: 700; font-size: 16px; border: none; border-radius: 10px; padding: 10px 20px; cursor: pointer; transition: background-color 0.2s;">
+                        Submit Feedback
+                    </button>
+                </form>
+                <p id="feedbackStatus" style="margin-top: 10px; font-weight: bold; text-align: center; color: var(--fg); min-height: 1.5em;"></p>
+            `;
+            
+            modalBody.innerHTML = feedbackFormHTML;
+
+            // Attach submit listener *after* injection.
+            setTimeout(() => {
+                const formEl = document.getElementById('feedbackForm');
+                if (formEl) {
+                    // Remove any potential previous listeners to prevent multiple submissions
+                    formEl.removeEventListener('submit', handleFeedbackSubmit);
+                    formEl.addEventListener('submit', handleFeedbackSubmit);
+                }
+            }, 0); 
+            
+        } else {
+            // Original logic for other modals
+            modalBody.innerHTML = content.body;
+        }
+        // --- END NEW FEEDBACK FORM LOGIC ---
     }
 
     // Show the modal
